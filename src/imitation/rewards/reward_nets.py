@@ -429,7 +429,10 @@ class SINDyRewardNet(RewardNet):
         if self.use_state:
             self.combined_size += preprocessing.get_flattened_obs_dim(observation_space)
         if self.use_action:
-            self.combined_size += preprocessing.get_flattened_obs_dim(action_space)
+            if isinstance(action_space, spaces.Discrete):
+                self.combined_size += int(action_space.n)
+            else:
+                self.combined_size += preprocessing.get_flattened_obs_dim(action_space)
         if self.use_next_state:
             self.combined_size += preprocessing.get_flattened_obs_dim(observation_space)
         if self.use_done:
@@ -465,11 +468,23 @@ class SINDyRewardNet(RewardNet):
     ) -> th.Tensor:
         inputs = []
         if self.use_state:
-            inputs.append(th.flatten(state, 1))
+            inputs.append(th.flatten(state, start_dim=1))
         if self.use_action:
-            inputs.append(th.flatten(action, 1))
+            if isinstance(self.action_space, spaces.Discrete):
+                if action.ndim > 1 and action.shape[-1] == int(self.action_space.n):
+                    # Action is already preprocessed to one-hot float tensor
+                    inputs.append(action.float())
+                else:
+                    action_int = action.long().flatten()
+                    action_one_hot = nn.functional.one_hot(
+                        action_int, num_classes=int(self.action_space.n)
+                    ).float()
+                    inputs.append(action_one_hot)
+            else:
+                action_flat = action if action.ndim > 1 else action.unsqueeze(-1)
+                inputs.append(th.flatten(action_flat, start_dim=1))
         if self.use_next_state:
-            inputs.append(th.flatten(next_state, 1))
+            inputs.append(th.flatten(next_state, start_dim=1))
         if self.use_done:
             inputs.append(th.reshape(done, [-1, 1]))
 
@@ -486,7 +501,7 @@ class SINDyRewardNet(RewardNet):
         inputs_np = inputs_concat.detach().cpu().numpy()
 
         features_np = self.feature_library.transform(inputs_np)
-        features_th = th.as_tensor(features_np, dtype=self.dtype, device=self.device)
+        features_th = th.as_tensor(features_np, dtype=self.weights.dtype, device=self.device)
 
         outputs = th.matmul(features_th, self.weights)
         assert outputs.shape == state.shape[:1]
@@ -520,7 +535,7 @@ class SINDyRewardNet(RewardNet):
         coefs = self.sindy_model.coefficients().flatten()
 
         with th.no_grad():
-            self.weights.copy_(th.as_tensor(coefs, dtype=self.dtype, device=self.device))
+            self.weights.copy_(th.as_tensor(coefs, dtype=self.weights.dtype, device=self.device))
 
 
 class BasicRewardNet(RewardNet):

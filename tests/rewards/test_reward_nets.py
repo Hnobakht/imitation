@@ -757,6 +757,57 @@ def test_sindy_reward_net_forward():
     assert logits.shape == (batch_size,)
 
 
+def test_airl_sindy_reward_net():
+    from imitation.algorithms.adversarial.airl import AIRL
+    from stable_baselines3 import PPO
+    from stable_baselines3.ppo import MlpPolicy
+    from imitation.data import types
+    from imitation.util.util import make_vec_env
+
+    rng = np.random.default_rng(0)
+    venv = make_vec_env("seals:seals/CartPole-v0", rng=rng)
+    gen_algo = PPO(policy=MlpPolicy, env=venv, n_steps=64, batch_size=64)
+
+    sindy_reward_net = reward_nets.SINDyRewardNet(
+        observation_space=venv.observation_space,
+        action_space=venv.action_space,
+        use_state=True,
+        use_action=True,
+    )
+
+    demo_obs = np.zeros((10, 4), dtype=np.float32)
+    demo_acts = np.zeros(10, dtype=np.int64)
+    demo_next_obs = np.zeros((10, 4), dtype=np.float32)
+    demo_dones = np.zeros(10, dtype=bool)
+
+    demos = types.Transitions(
+        obs=demo_obs,
+        acts=demo_acts,
+        next_obs=demo_next_obs,
+        dones=demo_dones,
+        infos=[{}] * 10,
+    )
+
+    airl_trainer = AIRL(
+        demonstrations=demos,
+        demo_batch_size=10,
+        venv=venv,
+        gen_algo=gen_algo,
+        reward_net=sindy_reward_net,
+    )
+
+    state_th = th.as_tensor(demo_obs)
+    action_th = th.as_tensor(demo_acts)
+    next_state_th = th.as_tensor(demo_next_obs)
+    done_th = th.as_tensor(demo_dones, dtype=th.float32)
+    log_policy_act_prob = th.zeros(10)
+
+    logits = airl_trainer.logits_expert_is_high(
+        state_th, action_th, next_state_th, done_th, log_policy_act_prob=log_policy_act_prob
+    )
+    assert logits.shape == (10,)
+
+
 def test_sindy_reward_net_fit():
     net = reward_nets.SINDyRewardNet(
         observation_space=gym.spaces.Box(-1, 1, shape=(2,)),
