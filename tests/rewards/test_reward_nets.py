@@ -736,6 +736,50 @@ def test_add_std_wrapper_raises_error_when_wrapping_wrong_type(env_2d):
         reward_nets.AddSTDRewardWrapper(mock_env, default_alpha=0.1)
 
 
+def test_sindy_reward_net_forward():
+    net = reward_nets.SINDyRewardNet(
+        observation_space=gym.spaces.Box(-1, 1, shape=(4,)),
+        action_space=gym.spaces.Discrete(2),
+        use_state=True,
+        use_action=True,
+        degree=2,
+    )
+    batch_size = 8
+    states = np.random.randn(batch_size, 4).astype(np.float32)
+    actions = np.random.randint(0, 2, size=(batch_size,)).astype(np.int64)
+    next_states = np.random.randn(batch_size, 4).astype(np.float32)
+    dones = np.zeros(batch_size, dtype=bool)
+
+    states_th, actions_th, next_states_th, dones_th = net.preprocess(
+        states, actions, next_states, dones
+    )
+    logits = net(states_th, actions_th, next_states_th, dones_th)
+    assert logits.shape == (batch_size,)
+
+
+def test_sindy_reward_net_fit():
+    net = reward_nets.SINDyRewardNet(
+        observation_space=gym.spaces.Box(-1, 1, shape=(2,)),
+        action_space=gym.spaces.Discrete(2),
+        use_state=True,
+        use_action=False,
+        degree=1,
+        threshold=0.01,
+    )
+    batch_size = 50
+    states = np.random.randn(batch_size, 2).astype(np.float32)
+    actions = np.zeros(batch_size, dtype=np.int64)
+    next_states = np.random.randn(batch_size, 2).astype(np.float32)
+    dones = np.zeros(batch_size, dtype=bool)
+
+    # linear target: 3 * s0 - 2 * s1
+    targets = 3.0 * states[:, 0] - 2.0 * states[:, 1]
+    net.fit_sindy(states, actions, next_states, dones, targets)
+
+    preds = net.predict(states, actions, next_states, dones)
+    np.testing.assert_allclose(preds, targets, atol=1e-2)
+
+
 def test_add_std_reward_wrapper(
     two_ensemble: reward_nets.RewardEnsemble,
     numpy_transitions: NumpyTransitions,

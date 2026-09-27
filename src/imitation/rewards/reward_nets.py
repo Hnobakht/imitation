@@ -380,6 +380,149 @@ class RewardNetWithVariance(RewardNet):
         """
 
 
+class SINDyRewardNet(RewardNet):
+    """Reward Network using PySINDy (Sparse Identification of Nonlinear Dynamics).
+
+    Computes rewards (or logits for GAIL) as a sparse linear combination of non-linear
+    candidate library features evaluated on state, action, next state, and done inputs.
+    """
+
+    def __init__(
+        self,
+        observation_space: gym.Space,
+        action_space: gym.Space,
+        use_state: bool = True,
+        use_action: bool = True,
+        use_next_state: bool = False,
+        use_done: bool = False,
+        degree: int = 2,
+        threshold: float = 0.05,
+        feature_library: Optional[Any] = None,
+        optimizer: Optional[Any] = None,
+        **kwargs,
+    ):
+        """Builds SINDy reward network.
+
+        Args:
+            observation_space: The observation space.
+            action_space: The action space.
+            use_state: Include state as input to feature library.
+            use_action: Include action as input to feature library.
+            use_next_state: Include next_state as input to feature library.
+            use_done: Include done as input to feature library.
+            degree: Polynomial degree for default PolynomialLibrary if feature_library is None.
+            threshold: Sparsity threshold for default STLSQ optimizer if optimizer is None.
+            feature_library: PySINDy feature library instance.
+            optimizer: PySINDy optimizer instance.
+            kwargs: Passed to super initializer.
+        """
+        import pysindy as ps
+
+        super().__init__(observation_space, action_space, **kwargs)
+
+        self.use_state = use_state
+        self.use_action = use_action
+        self.use_next_state = use_next_state
+        self.use_done = use_done
+
+        self.combined_size = 0
+        if self.use_state:
+            self.combined_size += preprocessing.get_flattened_obs_dim(observation_space)
+        if self.use_action:
+            self.combined_size += preprocessing.get_flattened_obs_dim(action_space)
+        if self.use_next_state:
+            self.combined_size += preprocessing.get_flattened_obs_dim(observation_space)
+        if self.use_done:
+            self.combined_size += 1
+
+        if feature_library is None:
+            self.feature_library = ps.PolynomialLibrary(degree=degree)
+        else:
+            self.feature_library = feature_library
+
+        if optimizer is None:
+            self.optimizer = ps.STLSQ(threshold=threshold)
+        else:
+            self.optimizer = optimizer
+
+        self.sindy_model = ps.SINDy(
+            feature_library=self.feature_library,
+            optimizer=self.optimizer,
+        )
+
+        dummy_x = np.zeros((1, self.combined_size), dtype=np.float32)
+        features_dummy = self.feature_library.fit_transform(dummy_x)
+        self.num_features = features_dummy.shape[1]
+
+        self.weights = nn.Parameter(th.zeros(self.num_features, dtype=th.float32))
+
+    def _extract_inputs(
+        self,
+        state: th.Tensor,
+        action: th.Tensor,
+        next_state: th.Tensor,
+        done: th.Tensor,
+    ) -> th.Tensor:
+        inputs = []
+        if self.use_state:
+            inputs.append(th.flatten(state, 1))
+        if self.use_action:
+            inputs.append(th.flatten(action, 1))
+        if self.use_next_state:
+            inputs.append(th.flatten(next_state, 1))
+        if self.use_done:
+            inputs.append(th.reshape(done, [-1, 1]))
+
+        return th.cat(inputs, dim=1)
+
+    def forward(
+        self,
+        state: th.Tensor,
+        action: th.Tensor,
+        next_state: th.Tensor,
+        done: th.Tensor,
+    ) -> th.Tensor:
+        inputs_concat = self._extract_inputs(state, action, next_state, done)
+        inputs_np = inputs_concat.detach().cpu().numpy()
+
+        features_np = self.feature_library.transform(inputs_np)
+        features_th = th.as_tensor(features_np, dtype=self.dtype, device=self.device)
+
+        outputs = th.matmul(features_th, self.weights)
+        assert outputs.shape == state.shape[:1]
+        return outputs
+
+    def fit_sindy(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        targets: np.ndarray,
+    ) -> None:
+        """Fits SINDy model to data and updates model parameters.
+
+        Args:
+            state: Current states array.
+            action: Actions array.
+            next_state: Next states array.
+            done: Done flags array.
+            targets: Target reward/logit values array of shape (batch_size,) or (batch_size, 1).
+        """
+        state_th, action_th, next_state_th, done_th = self.preprocess(
+            state, action, next_state, done
+        )
+        inputs_concat = self._extract_inputs(state_th, action_th, next_state_th, done_th)
+        inputs_np = inputs_concat.detach().cpu().numpy()
+        targets_np = np.asarray(targets, dtype=np.float32).reshape(-1, 1)
+
+        self.sindy_model.fit(inputs_np, t=1.0, x_dot=targets_np)
+        coefs = self.sindy_model.coefficients().flatten()
+
+        with th.no_grad():
+            self.weights.copy_(th.as_tensor(coefs, dtype=self.dtype, device=self.device))
+
+
 class BasicRewardNet(RewardNet):
     """MLP that takes as input the state, action, next state and done flag.
 
